@@ -71,7 +71,7 @@ def DeleteDomainJobStatus() {
         def domains = []
 
         // 安全傳遞 ADM_KEY
-        withCredentials([string(credentialsId: 'ADM_KEY_CREDENTIAL_ID', variable: 'ADM_KEY')]) {
+        withCredentials([string(credentialsId: 'STAGING_ADM_KEY', variable: 'ADM_KEY')]) {
             while (retryCount < maxRetries) {
                 def timestamp = new Date().format("yyyy-MM-dd HH:mm:ss", TimeZone.getTimeZone('Asia/Taipei'))
                 echo "🔄 第 ${retryCount + 1} 次輪詢 workflow 狀態（${timestamp}）..."
