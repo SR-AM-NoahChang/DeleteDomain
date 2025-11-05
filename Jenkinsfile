@@ -24,8 +24,8 @@ def DeleteDomainJobStatus() {
         "RecheckThirdLevelRandom": "RecheckThirdLevelRandom 複檢三級亂數",
         "RemoveAntiBlock": "RemoveAntiBlock 刪除抗封鎖",
         "RemoveAntiBlockTarget": "RemoveAntiBlockTarget 刪除抗封鎖目標",
-        "RemoveAntiHijackSource": "RemoveAntiHijackSource 刪除抗劫持",
-        "RemoveAntiHijackTarget": "RemoveAntiHijackTarget 刪除抗劫持目標",
+        "RemoveAntiHijackSource": "RemoveAntiHijackSource 撤下抗劫持",
+        "RemoveAntiHijackTarget": "RemoveAntiHijackTarget 撤下抗劫持目標",
         "RemoveTag": "RemoveTag 移除 Tag",
         "ReplaceCertificateProviderDetach": "ReplaceCertificateProviderDetach 替換憑證商下架",
         "ReuseAndDeployCert": "ReuseAndDeployCert 轉移憑證",
@@ -52,6 +52,7 @@ def DeleteDomainJobStatus() {
     }
 
     catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+
         def exported = readJSON file: '/tmp/exported_env.json'
         def workflowId = exported.values.find { it.key == 'DD_WORKFLOW_ID' }?.value
 
@@ -69,7 +70,8 @@ def DeleteDomainJobStatus() {
         def finalJobList = []
         def domains = []
 
-        withEnv(["ADM_KEY=${ADM_KEY}"]) {
+        // 安全傳遞 ADM_KEY
+        withCredentials([string(credentialsId: 'ADM_KEY_CREDENTIAL_ID', variable: 'ADM_KEY')]) {
             while (retryCount < maxRetries) {
                 def timestamp = new Date().format("yyyy-MM-dd HH:mm:ss", TimeZone.getTimeZone('Asia/Taipei'))
                 echo "🔄 第 ${retryCount + 1} 次輪詢 workflow 狀態（${timestamp}）..."
@@ -88,9 +90,10 @@ def DeleteDomainJobStatus() {
                 domains = jobs*.domain.findAll { it }?.unique() ?: []
 
                 // 更新最終 Job 狀態
-                finalJobList = jobs.collect {
-                    "- ${jobNameMap.get(it.name, it.name)}：${it.status}"
-                }
+                finalJobList = jobs.collect { [
+                    name: jobNameMap.get(it.name, it.name),
+                    status: it.status
+                ] }
 
                 // 若有 failure 或 blocked，立即停止輪詢
                 def hasFailureOrBlocked = jobs.any { it.status in ['failure', 'blocked'] }
@@ -117,42 +120,46 @@ def DeleteDomainJobStatus() {
                 echo "⏰ 超過最大重試次數或 Job 失敗/封鎖，workflow 未完成，視為失敗"
             }
 
-            // 發送 Webhook（顯示最終狀態）
+            // Groovy 生成 Job 狀態文字
+            def jobStatusText = finalJobList.collect { job ->
+                def symbol = "•"
+                if (job.status == "success") symbol = "✅"
+                else if (job.status == "blocked") symbol = "⚠️"
+                else if (job.status == "failure") symbol = "❌"
+                return "${symbol} ${job.name} : ${job.status}"
+            }.join("\n")
+
+            // Webhook payload
             def message = """
             {
-                "cards": [{
-                    "header": {
-                        "title": "ℹ️ 申請刪除域名 (Job狀態檢查)",
-                        "subtitle": "Workflow 輪詢完成",
-                        "imageUrl": "https://uxwing.com/wp-content/themes/uxwing/download/brands-and-social-media/postman-icon.png"
-                    },
-                    "sections": [{
-                    "widgets": [{
+              "cards": [{
+                "header": {
+                  "title": "ℹ️ 申請刪除域名 (Job狀態檢查)",
+                  "subtitle": "Workflow 輪詢完成",
+                  "imageUrl": "https://uxwing.com/wp-content/themes/uxwing/download/brands-and-social-media/postman-icon.png"
+                },
+                "sections": [{
+                  "widgets": [{
                     "textParagraph": {
-                        "text": " <b>環境</b> : <code>${envName}</code>\n" +
-                                " <b>BASE_URL</b> : <code>${BASE_URL}</code>\n" +
-                                " <b>Workflow ID</b> : <code>${workflowId}</code>\n" +
-                                " <b>Domain</b> : <code>${domains.join(', ')}</code>\n" +
-                                "-----------------------------------\n" +
-                                "<b>📋 Job 狀態：</b>\n" +
-                                finalJobList.map(job => {
-                                    let symbol = "•";
-                                    if(job.status === "success") symbol = "✅";
-                                    else if(job.status === "blocked") symbol = "⚠️";
-                                    else if(job.status === "failed") symbol = "❌";
-                                    return `${symbol} <b>${job.name}</b> : ${job.status}`;
-                                }).join("\n")
-                        }
-                    }]
+                      "text": "<b>環境</b> : <code>${envName}</code>\\n" +
+                              "<b>BASE_URL</b> : <code>${BASE_URL}</code>\\n" +
+                              "<b>Workflow ID</b> : <code>${workflowId}</code>\\n" +
+                              "<b>Domain</b> : <code>${domains.join(', ')}</code>\\n" +
+                              "-----------------------------------\\n" +
+                              "<b>📋 Job 狀態：</b>\\n${jobStatusText}"
+                    }
+                  }]
                 }]
-                }]
+              }]
             }
             """
+
             writeFile file: 'payload.json', text: message
-            sh 'curl -k -X POST -H "Content-Type: application/json" -d @payload.json "${WEBHOOK_URL}"'
+            sh "curl -k -X POST -H 'Content-Type: application/json' -d @payload.json ${WEBHOOK_URL}"
         }
     }
 }
+
 
 pipeline {
     agent any
