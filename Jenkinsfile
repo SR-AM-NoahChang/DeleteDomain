@@ -120,42 +120,49 @@ def DeleteDomainJobStatus() {
                 echo "⏰ 超過最大重試次數或 Job 失敗/封鎖，workflow 未完成，視為失敗"
             }
 
-            // Groovy 生成 Job 狀態文字
-            def jobStatusText = finalJobList.collect { job ->
-                def symbol = "•"
-                if (job.status == "success") symbol = "✅"
-                else if (job.status == "blocked") symbol = "⚠️"
-                else if (job.status == "failure") symbol = "❌"
-                return "${symbol} ${job.name} : ${job.status}"
-            }.join("\n")
+            // 產生 Job 狀態文字
+                def jobStatusText = finalJobList.collect { job ->
+                    def symbol = "•"
+                    if (job.status == "success") symbol = "✅"
+                    else if (job.status == "blocked") symbol = "⛔"
+                    else if (job.status == "failure") symbol = "❌"
+                    return " ${job.name} : ${symbol}"
+                }.join("\n")
 
-            // Webhook payload
-            def message = """
-            {
-              "cards": [{
-                "header": {
-                  "title": "ℹ️ 申請刪除域名 (Job狀態檢查)",
-                  "subtitle": "Workflow 輪詢完成",
-                  "imageUrl": "https://uxwing.com/wp-content/themes/uxwing/download/brands-and-social-media/postman-icon.png"
-                },
-                "sections": [{
-                  "widgets": [{
-                    "textParagraph": {
-                      "text": "<b>環境</b> : <code>${envName}</code>\\n" +
-                              "<b>BASE_URL</b> : <code>${BASE_URL}</code>\\n" +
-                              "<b>Workflow ID</b> : <code>${workflowId}</code>\\n" +
-                              "<b>Domain</b> : <code>${domains.join(', ')}</code>\\n" +
-                              "-----------------------------------\\n" +
-                              "<b>📋 Job 狀態：</b>\\n${jobStatusText}"
-                    }
-                  }]
-                }]
-              }]
-            }
-            """
+                // 卡片 JSON payload
+                def message = [
+                    cards: [[
+                        header: [
+                            title: "ℹ️ 申請刪除域名 (Job狀態檢查)",
+                            subtitle: "Workflow 輪詢完成",
+                            imageUrl: "https://uxwing.com/wp-content/themes/uxwing/download/brands-and-social-media/postman-icon.png"
+                        ],
+                        sections: [[
+                            widgets: [[
+                                textParagraph: [
+                                    text: """
+                環境 : <b>${envName}</b>
+                BASE_URL : <b>${BASE_URL}</b>
+                Workflow ID : <b>${workflowId}</b>
+                Domain : <b>${domains.join(', ')}</b>
 
-            writeFile file: 'payload.json', text: message
-            sh "curl -k -X POST -H 'Content-Type: application/json' -d @payload.json ${WEBHOOK_URL}"
+                -----------------------------------
+                <b> Job 狀態:</b>
+                ${jobStatusText}
+                """
+                                ]
+                            ]]
+                        ]]
+                    ]]
+                ]
+
+                // 將 payload 寫入檔案
+                writeFile file: 'payload.json', text: groovy.json.JsonOutput.toJson(message)
+
+                // 發送到 Google Chat
+                sh """
+                curl -s -X POST -H 'Content-Type: application/json' -d @payload.json "${WEBHOOK_URL}"
+                """
         }
     }
 }
