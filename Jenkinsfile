@@ -313,6 +313,7 @@ pipeline {
 
                 // 計算 BUILD_URL 去掉 https://
                 def buildUrlNoHttps = env.BUILD_URL.replaceFirst(/^https?:\/\//, '')
+
                 def message = """
                 {
                 "cards": [
@@ -327,7 +328,7 @@ pipeline {
                         {
                         "widgets": [
                             {"textParagraph": {"text": "完成時間：${timestamp}"}},
-                            {"textParagraph": {"text": "Allure 報告鏈結： <a href='${buildUrlNoHttps}allure'>點此查看</a>"}}
+                            {"textParagraph": {"text": "Allure 報告鏈結： <a href='http://${buildUrlNoHttps}allure'>點此查看</a>"}}
                         ]
                         }
                     ]
@@ -335,6 +336,7 @@ pipeline {
                 ]
                 }
                 """
+
                 writeFile file: 'payload.json', text: message
                 sh 'curl -k -X POST -H "Content-Type: application/json" -d @payload.json "$WEBHOOK_URL"'
             }
