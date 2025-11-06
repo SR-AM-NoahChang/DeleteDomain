@@ -120,42 +120,49 @@ def DeleteDomainJobStatus() {
                 echo "⏰ 超過最大重試次數或 Job 失敗/封鎖，workflow 未完成，視為失敗"
             }
 
-            // Groovy 生成 Job 狀態文字
-            def jobStatusText = finalJobList.collect { job ->
-                def symbol = "•"
-                if (job.status == "success") symbol = "✅"
-                else if (job.status == "blocked") symbol = "⚠️"
-                else if (job.status == "failure") symbol = "❌"
-                return "${symbol} ${job.name} : ${job.status}"
-            }.join("\n")
+            // 產生 Job 狀態文字
+                def jobStatusText = finalJobList.collect { job ->
+                    def symbol = "•"
+                    if (job.status == "success") symbol = "✅"
+                    else if (job.status == "blocked") symbol = "⛔"
+                    else if (job.status == "failure") symbol = "❌"
+                    return " ${job.name} : ${symbol}"
+                }.join("\n")
 
-            // Webhook payload
-            def message = """
-            {
-              "cards": [{
-                "header": {
-                  "title": "ℹ️ 申請刪除域名 (Job狀態檢查)",
-                  "subtitle": "Workflow 輪詢完成",
-                  "imageUrl": "https://uxwing.com/wp-content/themes/uxwing/download/brands-and-social-media/postman-icon.png"
-                },
-                "sections": [{
-                  "widgets": [{
-                    "textParagraph": {
-                      "text": "<b>環境</b> : <code>${envName}</code>\\n" +
-                              "<b>BASE_URL</b> : <code>${BASE_URL}</code>\\n" +
-                              "<b>Workflow ID</b> : <code>${workflowId}</code>\\n" +
-                              "<b>Domain</b> : <code>${domains.join(', ')}</code>\\n" +
-                              "-----------------------------------\\n" +
-                              "<b>📋 Job 狀態：</b>\\n${jobStatusText}"
-                    }
-                  }]
-                }]
-              }]
-            }
-            """
+                // 卡片 JSON payload
+                def message = [
+                    cards: [[
+                        header: [
+                            title: "ℹ️ 申請刪除域名 (Job狀態檢查)",
+                            subtitle: "Workflow 輪詢完成",
+                            imageUrl: "https://uxwing.com/wp-content/themes/uxwing/download/brands-and-social-media/postman-icon.png"
+                        ],
+                        sections: [[
+                            widgets: [[
+                                textParagraph: [
+                                    text: """
+                環境 : <b>${envName}</b>
+                BASE_URL : <b>${BASE_URL}</b>
+                Workflow ID : <b>${workflowId}</b>
+                Domain : <b>${domains.join(', ')}</b>
 
-            writeFile file: 'payload.json', text: message
-            sh "curl -k -X POST -H 'Content-Type: application/json' -d @payload.json ${WEBHOOK_URL}"
+                -----------------------------------
+                <b> Job 狀態:</b>
+                ${jobStatusText}
+                """
+                                ]
+                            ]]
+                        ]]
+                    ]]
+                ]
+
+                // 將 payload 寫入檔案
+                writeFile file: 'payload.json', text: groovy.json.JsonOutput.toJson(message)
+
+                // 發送到 Google Chat
+                sh """
+                curl -s -X POST -H 'Content-Type: application/json' -d @payload.json "${WEBHOOK_URL}"
+                """
         }
     }
 }
@@ -197,8 +204,8 @@ pipeline {
         stage('Show Commit Info') {
             steps {
                 sh '''
-                    bash -c "echo \"✅ 當前 Git commit：$(git rev-parse HEAD)\"; \
-                             echo \"📝 Commit 訊息：$(git log -1 --oneline)\""
+                    echo "✅ 當前 Git commit：$(git rev-parse HEAD)"
+                    echo "📝 Commit 訊息：$(git log -1 --oneline)"
                 '''
             }
         }
@@ -213,18 +220,20 @@ pipeline {
                         return envData?.values?.find { it.key == key }?.value
                     }
 
-                    // 逐筆測試資料執行
+                    // 確保目錄存在
+                    sh "mkdir -p '${ALLURE_RESULTS_DIR}' '${REPORT_DIR}' '${HTML_REPORT_DIR}' '${WORKSPACE}/environments'"
+
                     testData.eachWithIndex { dataRow, index ->
                         def testLabel = "資料${index + 1}"
                         def tmpDataFile = "${WORKSPACE}/data_${index + 1}.json"
                         writeJSON file: tmpDataFile, json: [dataRow]
 
+                        // 子 stage 1：刪除域名
                         stage("${testLabel} - 刪除域名") {
                             catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                                 def currentEnvFile = "${WORKSPACE}/environments/current_env_${index + 1}.json"
 
                                 sh """
-                                    mkdir -p ${WORKSPACE}/environments
                                     newman run "${COLLECTION_DIR}/申請刪除域名.postman_collection.json" \\
                                         --environment "${ENV_FILE}" \\
                                         --export-environment "/tmp/exported_env.json" \\
@@ -252,10 +261,39 @@ pipeline {
                             }
                         }
 
+                        // 子 stage 2：檢查 Job 狀態
                         stage("${testLabel} - 檢查申請 Job 狀態") {
-                            DeleteDomainJobStatus()
+                            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                DeleteDomainJobStatus()
+                            }
                         }
                     }
+
+                    // 合併所有 JSON 成 all_test_results.json
+                    def allResults = [:]
+                    testData.eachWithIndex { dataRow, index ->
+                        def jsonFile = "${REPORT_DIR}/Apply_${index + 1}.json"
+                        if (fileExists(jsonFile)) {
+                            def json = readJSON file: jsonFile
+                            allResults["資料${index + 1}"] = json.status ?: "UNKNOWN"
+                        } else {
+                            allResults["資料${index + 1}"] = "NO_RESULT"
+                        }
+                    }
+                    writeJSON file: "${REPORT_DIR}/all_test_results.json", json: allResults
+                }
+            }
+        }
+
+        stage('產生 Allure 報告') {
+            steps {
+                script {
+                    echo "📦 產生 Allure 測試報告..."
+                    allure([
+                        includeProperties: false,
+                        jdk: '',
+                        results: [[path: "${ALLURE_RESULTS_DIR}"]]
+                    ])
                 }
             }
         }
@@ -264,74 +302,50 @@ pipeline {
     post {
         always {
             script {
+                // 強制外層 Build 成功
                 currentBuild.result = 'SUCCESS'
-                def timestamp = new Date().format("yyyy-MM-dd HH:mm:ss", TimeZone.getTimeZone('Asia/Taipei'))
-                def testResults = readJSON file: "${REPORT_DIR}/all_test_results.json"
-                def orderedKeys = testResults.keySet().toList()
 
-                def resultLines = orderedKeys.collect { domain ->
-                    def result = testResults[domain]
-                    def emoji = (result == "SUCCESS") ? "🟢" :
-                                (result == "FAILURE") ? "🔴" : "⚪️"
-                    return "${emoji} ${domain}：${result}"
-                }.join("<br>")
+                def timestamp = new Date().format("yyyy-MM-dd HH:mm:ss", TimeZone.getTimeZone('Asia/Taipei'))
+
+                // 讀取測試結果，避免檔案不存在造成錯誤
+                def testResults = fileExists("${REPORT_DIR}/all_test_results.json") ? 
+                                readJSON(file: "${REPORT_DIR}/all_test_results.json") : [:]
+
+                // 計算 BUILD_URL 去掉 https://
+                def buildUrlNoHttps = env.BUILD_URL.replaceFirst(/^https?:\/\//, '')
 
                 def message = """
                 {
-                    "cards": [
+                "cards": [
+                    {
+                    "header": {
+                        "title": "✅ Jenkins Pipeline 執行完成",
+                        "subtitle": "專案：${env.JOB_NAME} (#${env.BUILD_NUMBER})",
+                        "imageUrl": "https://uxwing.com/wp-content/themes/uxwing/download/brands-and-social-media/jenkins-icon.png",
+                        "imageStyle": "AVATAR"
+                    },
+                    "sections": [
                         {
-                            "header": {
-                                "title": "✅ Jenkins Pipeline 執行完成",
-                                "subtitle": "專案：${env.JOB_NAME} (#${env.BUILD_NUMBER})",
-                                "imageUrl": "https://uxwing.com/wp-content/themes/uxwing/download/brands-and-social-media/jenkins-icon.png",
-                                "imageStyle": "AVATAR"
-                            },
-                            "sections": [
-                                {
-                                    "widgets": [
-                                        {
-                                            "keyValue": {
-                                                "topLabel": "整體狀態",
-                                                "content": "成功 (SUCCESS)"
-                                            }
-                                        },
-                                        {
-                                            "keyValue": {
-                                                "topLabel": "完成時間",
-                                                "content": "${timestamp}"
-                                            }
-                                        },
-                                        {
-                                            "textParagraph": {
-                                                "text": "<b>各筆資料結果：</b><br>${resultLines}"
-                                            }
-                                        }
-                                    ]
-                                }
-                            ]
+                        "widgets": [
+                            {"textParagraph": {"text": "完成時間：${timestamp}"}},
+                            {"textParagraph": {"text": "Allure 報告鏈結： <a href='http://${buildUrlNoHttps}allure'>點此查看</a>"}}
+                        ]
                         }
                     ]
+                    }
+                ]
                 }
                 """
 
                 writeFile file: 'payload.json', text: message
-                sh """
-                    curl -k -X POST \
-                        -H "Content-Type: application/json" \
-                        -d @payload.json \
-                        "$WEBHOOK_URL"
-                """
-
-                echo "📦 產生 Allure 測試報告..."
-                allure([
-                    includeProperties: false,
-                    jdk: '',
-                    results: [[path: "${ALLURE_RESULTS_DIR}"]]
-                ])
+                sh 'curl -k -X POST -H "Content-Type: application/json" -d @payload.json "$WEBHOOK_URL"'
             }
         }
     }
+
 }
+
+
 
 
 
